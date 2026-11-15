@@ -39,7 +39,8 @@ class ImuSimulator:
         self.rng = random.Random(seed)
         self.q: Quat = IDENTITY  # true body -> world orientation
 
-    def step(self, w_body: Vec3 = (0.0, 0.0, 0.0), button: bool = False) -> bytes:
+    def step(self, w_body: Vec3 = (0.0, 0.0, 0.0), button: bool = False,
+             accel_offset_g: Vec3 = (0.0, 0.0, 0.0)) -> bytes:
         dt = 1.0 / self.sample_rate
         self.q = q_integrate(self.q, w_body, dt)
         m = q_to_matrix(self.q)
@@ -47,11 +48,17 @@ class ImuSimulator:
         gauss = self.rng.gauss
         gyro = [math.degrees(w_body[i]) / self.gyro_scale + self.gyro_bias[i] + gauss(0, self.gyro_noise)
                 for i in range(3)]
-        accel = [grav_body[i] * self.one_g + gauss(0, self.accel_noise) for i in range(3)]
+        accel = [(grav_body[i] + accel_offset_g[i]) * self.one_g + gauss(0, self.accel_noise) for i in range(3)]
         return encode_frame(button, gyro + accel if self.gyro_first else accel + gyro)
 
     def hold(self, seconds: float, button: bool = False) -> bytes:
         return b"".join(self.step(button=button) for _ in range(int(seconds * self.sample_rate)))
+
+    def tap(self, strength_g: float = 0.4, button: bool = False) -> bytes:
+        """A knock on the table: a short ringing jolt along the cap's axis (4 samples)."""
+        ring = (1.0, -0.7, 0.35, -0.1)
+        return b"".join(self.step(button=button, accel_offset_g=(0.05 * k * strength_g, 0.0, k * strength_g))
+                        for k in ring)
 
     def rotate(self, axis: Vec3, degrees: float, seconds: float, button: bool = False) -> bytes:
         """Rotate about a body axis at constant speed."""

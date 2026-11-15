@@ -62,7 +62,7 @@ def test_click_double_and_long_press():
     sim, p, events = calibrated(seed=5)
     events.clear()
     p.feed(sim.hold(0.1, button=True) + sim.hold(0.6))
-    assert names(events) == ["press", "release", "click"]
+    assert names(events) == ["press", "release", "click", "single_click"]
 
     events.clear()
     p.feed(sim.hold(0.1, button=True) + sim.hold(0.1) + sim.hold(0.1, button=True) + sim.hold(0.6))
@@ -164,3 +164,54 @@ def test_zero_pose_with_upside_down_mount():
     p.zero()
     p.feed(sim.hold(1.0))  # position changes once it has been held for flip_hold_s
     assert p.state.face == "up" and p.state.tilt < 1
+
+
+def test_double_tap():
+    sim, p, events = calibrated(seed=15)
+    events.clear()
+    p.feed(sim.tap(0.4) + sim.hold(0.25) + sim.tap(0.4) + sim.hold(0.6))
+    assert names(events) == ["tap", "tap", "double_tap"]
+    assert events[0].value > 0.3
+
+
+def test_single_tap_and_slow_taps_are_not_double():
+    sim, p, events = calibrated(seed=16)
+    events.clear()
+    p.feed(sim.tap(0.4) + sim.hold(0.9) + sim.tap(0.4) + sim.hold(0.9))
+    assert names(events) == ["tap", "tap"]
+
+
+def test_weak_knock_ignored():
+    sim, p, events = calibrated(seed=17)
+    events.clear()
+    p.feed(sim.tap(0.05) + sim.hold(0.2) + sim.tap(0.05) + sim.hold(0.6))
+    assert "tap" not in names(events)
+
+
+def test_taps_ignored_while_handling_the_cap():
+    sim, p, events = calibrated(seed=18)
+    events.clear()
+    # jolts while it is being turned quickly
+    p.feed(sim.rotate((0, 0, 1), 30, 0.1) + sim.tap(0.5) + sim.rotate((0, 0, 1), 30, 0.1) + sim.tap(0.5))
+    p.feed(sim.rotate((0, 0, 1), 30, 0.1) + sim.hold(0.8))
+    assert "tap" not in names(events)
+
+
+def test_button_press_jolt_is_not_a_tap():
+    sim, p, events = calibrated(seed=19)
+    events.clear()
+    # pressing the button knocks the accelerometer one sample before the button reads pressed
+    p.feed(sim.tap(0.5) + sim.hold(0.1, button=True) + sim.hold(0.2)
+           + sim.tap(0.5) + sim.hold(0.1, button=True) + sim.hold(0.8))
+    assert "tap" not in names(events)
+    assert names(events).count("click") == 2
+
+
+def test_single_click_waits_for_double():
+    sim, p, events = calibrated(seed=20)
+    events.clear()
+    p.feed(sim.hold(0.1, button=True) + sim.hold(0.6))
+    assert names(events) == ["press", "release", "click", "single_click"]
+    events.clear()
+    p.feed(sim.hold(0.1, button=True) + sim.hold(0.1) + sim.hold(0.1, button=True) + sim.hold(0.6))
+    assert "single_click" not in names(events) and "double_click" in names(events)

@@ -5,7 +5,7 @@ sized Bluetooth LE device with an accelerometer, a gyroscope and a button.
 
 It handles the BLE connection, reassembles the data stream, calibrates the
 sensors, tracks the cap's 3D orientation and turns motion into simple events:
-**click, double click, long press, twist (knob) and flip**.
+**click, double click, long press, twist (knob), flip and taps on the table**.
 
 ```python
 import triki
@@ -88,6 +88,7 @@ async with triki.Triki() as cap:          # or triki.SimulatedTriki()
 | `up_z` | +1 face up … −1 face down |
 | `face` | `"up"`, `"down"` or `None` while on its edge |
 | `twist_dps` | spin speed about the vertical axis, + = clockwise seen from above |
+| `impact_g` | accelerometer jump this sample (what taps are measured by) |
 | `quaternion` | `(w, x, y, z)` body → world |
 | `gyro_dps`, `accel_g` | calibrated sensor readings in the cap's own frame |
 | `button` | button currently held |
@@ -99,10 +100,12 @@ async with triki.Triki() as cap:          # or triki.SimulatedTriki()
 | event | `e.value` |
 |---|---|
 | `press` / `release` | — / hold duration (s) |
-| `click`, `double_click` | — |
+| `click`, `double_click` | — (`click` fires at once, also for each half of a double click) |
+| `single_click` | — a click not followed by a second one; use it together with `double_click` |
 | `long_press` | — (fires while still held; that press gives no `click`) |
 | `twist` | degrees turned this sample, + = clockwise. Use `triki.Knob` to get whole notches |
 | `flip` | `"up"` or `"down"` once the cap has settled |
+| `tap`, `double_tap` | strength in g — a knock on the table next to the cap while it lies still |
 | `calibrated` | dict: detected gyro axes, 1 g in LSB, gyro bias, noise |
 | `status` | raw bytes of a non-IMU frame (protocol research) |
 | `frame` | — (every sample) |
@@ -129,6 +132,7 @@ reset yaw drift, or if the sensor inside your cap is mounted at an angle
 cfg = triki.Config(
     double_click_s=0.35, long_press_s=0.6,
     twist_deadzone_dps=10, twist_max_tilt_deg=35,
+    tap_threshold_g=0.15, double_tap_s=0.5,  # watch state.impact_g to tune taps
     flip_threshold=0.6, flip_hold_s=0.5,
     gyro_scale=0.070, sample_rate=104,     # sensor assumptions, see PROTOCOL.md
     kp=1.5,                                # how hard the accelerometer corrects tilt

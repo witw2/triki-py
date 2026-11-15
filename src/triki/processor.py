@@ -10,13 +10,18 @@ Events (each handler receives one :class:`Event`):
 ``calibrated``     calibration finished, ``value`` = dict with details
 ``press``          button went down
 ``release``        button went up, ``value`` = hold duration in seconds
-``click``          short press released
+``click``          short press released (fires immediately, also for each half of a double click)
+``single_click``   a click that was *not* followed by a second one (arrives
+                   ``Config.double_click_s`` later) - use it together with ``double_click``
 ``double_click``   second click within ``Config.double_click_s``
 ``long_press``     button held for ``Config.long_press_s`` (fires while held,
                    that press then produces no ``click``)
 ``twist``          cap rotated like a knob, ``value`` = degrees this sample,
                    positive = clockwise when looking down at the cap
 ``flip``           cap settled face ``"up"`` or ``"down"`` (``value``)
+``tap``            a knock on the table (or on the cap) while it lies still,
+                   ``value`` = strength in g
+``double_tap``     second tap within ``Config.double_tap_s``
 ``status``         a non-IMU frame arrived, ``value`` = its raw bytes
 =================  ==========================================================
 
@@ -39,8 +44,8 @@ log = logging.getLogger("triki")
 
 _FLIP_X: Quat = (0.0, 1.0, 0.0, 0.0)  # 180 deg about X
 
-EVENTS = ("frame", "calibrated", "press", "release", "click", "double_click", "long_press",
-          "twist", "flip", "status")
+EVENTS = ("frame", "calibrated", "press", "release", "click", "single_click", "double_click",
+          "long_press", "twist", "flip", "tap", "double_tap", "status")
 
 
 @dataclass
@@ -67,6 +72,12 @@ class Config:
     twist_max_tilt_deg: float = 35.0  # twist only counts while the cap is roughly flat
     flip_threshold: float = 0.6       # |up_z| needed to count as face up/down
     flip_hold_s: float = 0.5
+    # taps (knocks on the table, detected as sudden accelerometer jumps while the cap is still)
+    tap_threshold_g: float = 0.15     # jump in acceleration between two samples that counts as a tap
+    tap_max_rotation_dps: float = 40.0  # ignore taps while the cap is being turned / picked up
+    tap_refractory_s: float = 0.08    # one knock rings for a few samples - count it once
+    tap_confirm_s: float = 0.15       # wait this long so a button press can veto the tap
+    double_tap_s: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ class State:
     up_z: float = 1.0                      # +1 face up, -1 face down
     face: Optional[str] = None             # "up", "down" or None (on edge / unknown)
     twist_dps: float = 0.0                 # + = clockwise seen from above
+    impact_g: float = 0.0                  # accelerometer jump this sample (what taps are measured by)
     calibrating: bool = True
 
     @property
@@ -159,9 +171,16 @@ class Processor(EventEmitter):
         self._down_at = 0.0
         self._long_fired = False
         self._last_click = -1e9
+        self._pending_single: Optional[float] = None
         # flip
         self._pending_face: Optional[str] = None
         self._pending_since = 0.0
+        # taps
+        self._prev_accel: Optional[Vec3] = None
+        self._tap_candidates: List[Tuple[float, float]] = []  # (time, strength)
+        self._last_candidate = -1e9
+        self._quiet_until = 0.0      # no taps until then (motion / button)
+        self._last_tap = -1e9
 
     # ------------------------------------------------------------- control
     @property
@@ -300,16 +319,52 @@ class Processor(EventEmitter):
             face = cand
             events.append(("flip", face))
 
+        impact = self._update_taps(gyro, accel, t, events)
+
         self.state = State(t=t, frame=self._frames, button=frame.button, raw=axes,
                            gyro_dps=gyro, accel_g=accel, quaternion=q,
                            roll=roll, pitch=pitch, yaw=yaw, up_z=up_z, face=face,
-                           twist_dps=twist, calibrating=False)
+                           twist_dps=twist, impact_g=impact, calibrating=False)
+
+    def _update_taps(self, gyro: Vec3, accel: Vec3, t: float, events) -> float:
+        cfg = self.config
+        prev, self._prev_accel = self._prev_accel, accel
+        if prev is None:
+            return 0.0
+        impact = math.sqrt(sum((a - b) ** 2 for a, b in zip(accel, prev)))
+
+        if math.sqrt(dot(gyro, gyro)) > cfg.tap_max_rotation_dps:
+            # being handled: drop knocks that were really the start of this movement
+            self._quiet_until = t + 0.25
+            self._tap_candidates = [c for c in self._tap_candidates if c[0] < t - 0.1]
+        if (impact >= cfg.tap_threshold_g and t >= self._quiet_until and not self._button
+                and t - self._last_candidate >= cfg.tap_refractory_s):
+            self._tap_candidates.append((t, impact))
+            self._last_candidate = t
+        elif self._tap_candidates and self._tap_candidates[-1][0] == self._last_candidate \
+                and t - self._last_candidate < cfg.tap_refractory_s:
+            # same knock still ringing: keep its peak strength
+            tc, strength = self._tap_candidates[-1]
+            self._tap_candidates[-1] = (tc, max(strength, impact))
+
+        while self._tap_candidates and t - self._tap_candidates[0][0] >= cfg.tap_confirm_s:
+            tc, strength = self._tap_candidates.pop(0)
+            events.append(("tap", strength))
+            if tc - self._last_tap <= cfg.double_tap_s:
+                events.append(("double_tap", strength))
+                self._last_tap = -1e9
+            else:
+                self._last_tap = tc
+        return impact
 
     def _update_button(self, pressed: bool, t: float, events) -> None:
         cfg = self.config
         if pressed != self._button and t - self._last_edge >= cfg.debounce_s:
             self._button = pressed
             self._last_edge = t
+            # pressing the button jolts the accelerometer: that is not a tap
+            self._tap_candidates = [c for c in self._tap_candidates if c[0] < t - cfg.tap_confirm_s]
+            self._quiet_until = max(self._quiet_until, t + 0.25)
             if pressed:
                 self._down_at, self._long_fired = t, False
                 events.append(("press", None))
@@ -320,11 +375,17 @@ class Processor(EventEmitter):
                     if t - self._last_click <= cfg.double_click_s:
                         events.append(("double_click", None))
                         self._last_click = -1e9  # a triple click is not two doubles
+                        self._pending_single = None
                     else:
                         self._last_click = t
+                        self._pending_single = t
         if self._button and not self._long_fired and t - self._down_at >= cfg.long_press_s:
             self._long_fired = True
             events.append(("long_press", None))
+        if (self._pending_single is not None and not self._button
+                and t - self._pending_single > cfg.double_click_s):
+            self._pending_single = None
+            events.append(("single_click", None))
 
 
 class Knob:

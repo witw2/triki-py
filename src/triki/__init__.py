@@ -22,7 +22,7 @@ from .processor import EVENTS, Config, Event, Knob, Processor, State
 from .protocol import CMD_START, CMD_STOP, FrameParser, RawFrame, encode_frame, start_command
 from .simulator import ImuSimulator, SimulatedTriki
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "BackgroundTriki", "connect",
