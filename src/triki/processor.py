@@ -37,6 +37,8 @@ from .protocol import FrameParser, RawFrame
 
 log = logging.getLogger("triki")
 
+_FLIP_X: Quat = (0.0, 1.0, 0.0, 0.0)  # 180 deg about X
+
 EVENTS = ("frame", "calibrated", "press", "release", "click", "double_click", "long_press",
           "twist", "flip", "status")
 
@@ -48,6 +50,7 @@ class Config:
     sample_rate: float = 104.0       # Hz, used as the integration time step
     layout: str = "auto"             # "auto", "gyro_first" (ABC=gyro) or "accel_first"
     invert_gyro: bool = False
+    upside_down: bool = False        # sensor sits flipped in the cap: its +Z points into the cap
     # fusion
     kp: float = 1.5                  # how strongly the accelerometer corrects tilt
     ki: float = 0.02
@@ -244,7 +247,7 @@ class Processor(EventEmitter):
         self._q_ref = IDENTITY
         self._calibrating = False
         self._calib = []
-        up_z = q_to_matrix(self.fusion.q)[2][2]
+        up_z = q_to_matrix(self._cap_q(self.fusion.q))[2][2]
         face = self._face_of(up_z)
         self._pending_face, self._pending_since = face, 0.0
         self.state = replace(self.state, face=face, up_z=up_z)
@@ -255,6 +258,10 @@ class Processor(EventEmitter):
             "noise_lsb": noise,
             "still": still,
         }
+
+    def _cap_q(self, q_sensor: Quat) -> Quat:
+        """Sensor orientation -> cap orientation (applies Config.upside_down)."""
+        return q_mul(q_sensor, _FLIP_X) if self.config.upside_down else q_sensor
 
     def _face_of(self, up_z: float) -> Optional[str]:
         th = self.config.flip_threshold
@@ -270,10 +277,11 @@ class Processor(EventEmitter):
 
         self.fusion.kp, self.fusion.ki = cfg.kp, cfg.ki
         q_abs = self.fusion.update(tuple(math.radians(v) for v in gyro), accel, dt)
+        q_cap = self._cap_q(q_abs)
         if self._zero_pending:
-            self._q_ref = q_abs
+            self._q_ref = q_cap
             self._zero_pending = False
-        q = q_mul(q_abs, q_conj(self._q_ref))
+        q = q_mul(q_cap, q_conj(self._q_ref))
         roll, pitch, yaw = (math.degrees(v) for v in q_to_euler(q))
         up_z = q_to_matrix(q)[2][2]
 

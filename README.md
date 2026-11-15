@@ -115,6 +115,10 @@ Every event has `e.name`, `e.t` and `e.state`.
 On connect the cap calibrates itself: **keep it still for about a second**. If it
 moves, calibration retries automatically. Call `cap.calibrate()` to redo it.
 
+If the cap reports "face up" while it lies on its back, set
+`Config(upside_down=True)`: the sensor is mounted flipped. This is permanent,
+unlike `cap.zero()`, which is reset by every calibration.
+
 `cap.zero()` declares the current pose as "flat, facing forward". Use it to
 reset yaw drift, or if the sensor inside your cap is mounted at an angle
 (e.g. face up and face down come out swapped).
@@ -128,6 +132,7 @@ cfg = triki.Config(
     flip_threshold=0.6, flip_hold_s=0.5,
     gyro_scale=0.070, sample_rate=104,     # sensor assumptions, see PROTOCOL.md
     kp=1.5,                                # how hard the accelerometer corrects tilt
+    upside_down=False,                     # True if the sensor sits flipped in your cap
 )
 cap = triki.connect(config=cfg)
 ```

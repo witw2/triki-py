@@ -146,3 +146,21 @@ def test_unknown_event_name_rejected():
 def test_knob():
     k = Knob(10)
     assert [k.update(d) for d in (4, 4, 4, -25)] == [0, 0, 1, -2]
+
+
+def test_upside_down_mount_swaps_faces_but_not_twist():
+    sim, p, events = calibrated(seed=13, config=Config(upside_down=True))
+    assert p.state.face == "down"             # sensor up = cap lying on its back
+    assert abs(abs(p.state.roll) - 180) < 2
+    events.clear()
+    p.feed(sim.rotate((0, 0, -1), 90, seconds=1.0))  # clockwise seen from above
+    assert 80 < sum(e.value for e in events if e.name == "twist") < 100
+    p.feed(sim.rotate((1, 0, 0), 180, seconds=0.6) + sim.hold(1.0))
+    assert [e.value for e in events if e.name == "flip"] == ["up"]
+
+
+def test_zero_pose_with_upside_down_mount():
+    sim, p, _ = calibrated(seed=14, config=Config(upside_down=True))
+    p.zero()
+    p.feed(sim.hold(1.0))  # position changes once it has been held for flip_hold_s
+    assert p.state.face == "up" and p.state.tilt < 1

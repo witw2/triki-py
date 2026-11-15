@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "triki"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python library for the Triki bottle-cap motion controller: BLE connection, orientation tracking and gestures."
 readme = "README.md"
 license = { file = "LICENSE" }
