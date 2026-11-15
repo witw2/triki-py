@@ -122,6 +122,10 @@ If the cap reports "face up" while it lies on its back, set
 `Config(upside_down=True)`: the sensor is mounted flipped. This is permanent,
 unlike `cap.zero()`, which is reset by every calibration.
 
+To skip the wait next time (e.g. when the cap wakes from sleep), save
+`cap.calibration_snapshot()` and call `cap.restore_calibration(snapshot)` before
+connecting. `cap.seconds_since_data` tells you when a cap has gone quiet.
+
 `cap.zero()` declares the current pose as "flat, facing forward". Use it to
 reset yaw drift, or if the sensor inside your cap is mounted at an angle
 (e.g. face up and face down come out swapped).

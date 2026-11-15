@@ -61,6 +61,7 @@ class Controller:
 
     def __init__(self, config: Optional[Config] = None):
         self.processor = Processor(config)
+        self._restore = None
 
     # --- delegation
     @property
@@ -84,6 +85,19 @@ class Controller:
 
     def calibrate(self) -> None:
         self.processor.start_calibration()
+
+    def calibration_snapshot(self):
+        """Plain dict describing the current calibration (save it to skip calibrating next time)."""
+        return self.processor.calibration_snapshot()
+
+    def restore_calibration(self, snapshot) -> None:
+        """Reuse a saved calibration on the next connect instead of measuring a new one."""
+        self._restore = snapshot
+
+    @property
+    def seconds_since_data(self) -> float:
+        """Wall-clock seconds since the cap last sent anything."""
+        return self.processor.seconds_since_data
 
     def zero(self) -> None:
         self.processor.zero()
@@ -169,7 +183,7 @@ class Triki(Controller):
         self._client = BleakClient(self.address, disconnected_callback=self._disconnected, timeout=timeout)
         await self._client.connect()
         self.processor.parser.reset()
-        self.processor.start_calibration()
+        self.processor.start_calibration(self._restore)
         await self._client.start_notify(NUS_NOTIFY, lambda _s, data: self.processor.feed(bytes(data)))
         await self.send(self.start_command)
         log.info("connected to %s", self.address)

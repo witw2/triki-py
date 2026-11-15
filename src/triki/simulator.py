@@ -84,7 +84,7 @@ class SimulatedTriki(Controller):
         return self._task is not None and not self._task.done()
 
     async def connect(self) -> None:
-        self.processor.start_calibration()
+        self.processor.start_calibration(self._restore)
         self._task = asyncio.get_running_loop().create_task(self._run())
 
     async def disconnect(self) -> None:

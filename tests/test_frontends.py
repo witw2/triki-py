@@ -34,3 +34,46 @@ def test_cli_help(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
     assert "monitor" in capsys.readouterr().out
+
+
+def test_stop_cancels_a_connect_in_progress():
+    import asyncio
+    cap = triki.BackgroundTriki(simulate=True)
+
+    async def slow_connect():
+        await asyncio.sleep(30)          # e.g. a sleeping cap that never answers
+    cap.controller.connect = slow_connect
+    import threading
+    errors = []
+    t = threading.Thread(target=lambda: errors.append(_try_start(cap)))
+    t.start()
+    time.sleep(0.3)
+    started = time.time()
+    cap.stop()
+    t.join(5)
+    assert not t.is_alive() and time.time() - started < 3
+    assert isinstance(errors[0], triki.TrikiError)
+
+
+def _try_start(cap):
+    try:
+        cap.start(timeout=20)
+    except Exception as ex:
+        return ex
+    return None
+
+
+def test_restored_calibration_skips_waiting():
+    first = triki.BackgroundTriki(simulate=True)
+    with first:
+        assert first.wait_calibrated(5)
+        snap = first.calibration_snapshot()
+    assert snap["gyro_axes"] == "ABC"
+    second = triki.BackgroundTriki(simulate=True)
+    second.restore_calibration(snap)
+    infos = []
+    second.on("calibrated", lambda e: infos.append(e.value))
+    with second:
+        assert second.wait_calibrated(1)
+        assert second.seconds_since_data < 0.5
+    assert infos[0]["restored"] is True

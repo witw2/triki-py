@@ -215,3 +215,16 @@ def test_single_click_waits_for_double():
     events.clear()
     p.feed(sim.hold(0.1, button=True) + sim.hold(0.1) + sim.hold(0.1, button=True) + sim.hold(0.6))
     assert "single_click" not in names(events) and "double_click" in names(events)
+
+
+def test_button_held_when_data_starts_is_not_a_click():
+    sim = ImuSimulator(seed=21)
+    p = Processor()
+    ev = []
+    p.on("*", lambda e: ev.append(e.name) if e.name != "frame" else None)
+    p.feed(sim.hold(0.2, button=True) + sim.hold(1.5))
+    assert "press" not in ev and "click" not in ev
+
+
+def test_snapshot_none_before_first_calibration():
+    assert Processor().calibration_snapshot() is None

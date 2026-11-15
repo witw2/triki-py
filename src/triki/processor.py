@@ -8,6 +8,7 @@ Events (each handler receives one :class:`Event`):
 =================  ==========================================================
 ``frame``          every processed sample (``event.state``)
 ``calibrated``     calibration finished, ``value`` = dict with details
+                   (``restored`` is True when a previous calibration was reused)
 ``press``          button went down
 ``release``        button went up, ``value`` = hold duration in seconds
 ``click``          short press released (fires immediately, also for each half of a double click)
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -164,7 +166,10 @@ class Processor(EventEmitter):
         self._calib: List[Tuple[int, ...]] = []
         self._calib_attempts = 0
         self._calibrating = True
+        self._restore: Optional[dict] = None
+        self._has_calibration = False
         self._frames = 0
+        self._last_data = time.monotonic()
         # button
         self._button = False
         self._last_edge = -1e9
@@ -187,11 +192,30 @@ class Processor(EventEmitter):
     def calibrating(self) -> bool:
         return self._calibrating
 
-    def start_calibration(self) -> None:
-        """Keep the cap still for ~calib_frames samples after calling this."""
+    def start_calibration(self, restore: Optional[dict] = None) -> None:
+        """Keep the cap still for ~calib_frames samples after calling this.
+
+        ``restore``: a previous ``calibrated`` event value (or :meth:`calibration_snapshot`).
+        It is applied on the first sample instead, so e.g. a reconnect after the cap
+        woke up from sleep is usable immediately.
+        """
         self._calibrating = True
         self._calib = []
         self._calib_attempts = 0
+        self._restore = restore if _valid_snapshot(restore) else None
+
+    def calibration_snapshot(self) -> Optional[dict]:
+        """Current calibration as a plain (JSON-friendly) dict, or None before the first one."""
+        if not self._has_calibration:
+            return None
+        cal = self.calibration
+        return {"gyro_axes": "ABC" if cal.gyro_first else "DEF", "one_g_lsb": cal.one_g,
+                "gyro_bias_lsb": list(cal.gyro_bias)}
+
+    @property
+    def seconds_since_data(self) -> float:
+        """Wall-clock seconds since the last bytes arrived (a sleeping cap goes quiet)."""
+        return time.monotonic() - self._last_data
 
     def zero(self) -> None:
         """Treat the current pose as 'flat, facing forward' (also clears yaw drift)."""
@@ -200,6 +224,7 @@ class Processor(EventEmitter):
     # ------------------------------------------------------------- input
     def feed(self, data: bytes) -> None:
         """Feed raw notification bytes (any fragmentation)."""
+        self._last_data = time.monotonic()
         for frame in self.parser.feed(data):
             self.process(frame)
 
@@ -209,8 +234,15 @@ class Processor(EventEmitter):
         t = self._frames / cfg.sample_rate
         dt = 1.0 / cfg.sample_rate
         events: List[Tuple[str, Any]] = []
+        if self._frames == 1 and frame.button:
+            # held already when data started (e.g. the press that woke the cap): no click
+            self._button, self._last_edge, self._down_at, self._long_fired = True, t, t, True
 
-        if self._calibrating:
+        if self._calibrating and self._restore is not None:
+            events.append(("calibrated", self._apply_restore(frame)))
+            self.state = replace(self.state, t=t, frame=self._frames, button=frame.button,
+                                 raw=frame.axes, calibrating=False)
+        elif self._calibrating:
             self._calib.append(frame.axes)
             if len(self._calib) >= cfg.calib_frames:
                 info = self._finish_calibration()
@@ -257,19 +289,11 @@ class Processor(EventEmitter):
             return None
 
         a_mean = tuple(mean[i] for i in a_idx)
-        self.calibration = _Calibration(
+        self._finish(_Calibration(
             gyro_bias=tuple(mean[i] for i in g_idx),
             one_g=math.sqrt(dot(a_mean, a_mean)) or 2048.0,
             gyro_first=gyro_first,
-        )
-        self.fusion.reset(q_from_gravity(a_mean))
-        self._q_ref = IDENTITY
-        self._calibrating = False
-        self._calib = []
-        up_z = q_to_matrix(self._cap_q(self.fusion.q))[2][2]
-        face = self._face_of(up_z)
-        self._pending_face, self._pending_since = face, 0.0
-        self.state = replace(self.state, face=face, up_z=up_z)
+        ), a_mean)
         return {
             "gyro_axes": "ABC" if gyro_first else "DEF",
             "one_g_lsb": self.calibration.one_g,
@@ -277,6 +301,26 @@ class Processor(EventEmitter):
             "noise_lsb": noise,
             "still": still,
         }
+
+    def _finish(self, cal: "_Calibration", accel_raw) -> None:
+        self.calibration = cal
+        self._has_calibration = True
+        self.fusion.reset(q_from_gravity(tuple(accel_raw)))
+        self._q_ref = IDENTITY
+        self._calibrating = False
+        self._calib = []
+        up_z = q_to_matrix(self._cap_q(self.fusion.q))[2][2]
+        face = self._face_of(up_z)
+        self._pending_face, self._pending_since = face, 0.0
+        self.state = replace(self.state, face=face, up_z=up_z)
+
+    def _apply_restore(self, frame: RawFrame) -> dict:
+        r, self._restore = self._restore, None
+        cal = _Calibration(gyro_bias=tuple(float(v) for v in r["gyro_bias_lsb"]),
+                           one_g=float(r["one_g_lsb"]), gyro_first=r["gyro_axes"] == "ABC")
+        self._finish(cal, frame.axes[3:] if cal.gyro_first else frame.axes[:3])
+        return {"gyro_axes": r["gyro_axes"], "one_g_lsb": cal.one_g, "gyro_bias_lsb": cal.gyro_bias,
+                "noise_lsb": 0.0, "still": True, "restored": True}
 
     def _cap_q(self, q_sensor: Quat) -> Quat:
         """Sensor orientation -> cap orientation (applies Config.upside_down)."""
@@ -386,6 +430,14 @@ class Processor(EventEmitter):
                 and t - self._pending_single > cfg.double_click_s):
             self._pending_single = None
             events.append(("single_click", None))
+
+
+def _valid_snapshot(r) -> bool:
+    try:
+        return (r["gyro_axes"] in ("ABC", "DEF") and float(r["one_g_lsb"]) > 0
+                and len(r["gyro_bias_lsb"]) == 3)
+    except (TypeError, KeyError, ValueError):
+        return False
 
 
 class Knob:

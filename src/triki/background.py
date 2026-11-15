@@ -18,7 +18,7 @@ import asyncio
 import threading
 from typing import Optional
 
-from .device import Controller, Triki
+from .device import Controller, Triki, TrikiError
 from .processor import Config, State
 
 
@@ -36,6 +36,7 @@ class BackgroundTriki:
         self._ready = threading.Event()
         self._calibrated = threading.Event()
         self._error: Optional[BaseException] = None
+        self._stop_requested = False
         self.controller.on("calibrated", lambda e: self._calibrated.set())
 
     # --- lifecycle
@@ -50,27 +51,52 @@ class BackgroundTriki:
         return self
 
     def stop(self) -> None:
-        if self._loop and self._stop:
-            self._loop.call_soon_threadsafe(self._stop.set)
-        if self._thread:
+        """Disconnect - also cancels a connection attempt that is still in progress."""
+        self._stop_requested = True
+        loop, stop = self._loop, self._stop
+        if loop and stop:
+            try:
+                loop.call_soon_threadsafe(stop.set)
+            except RuntimeError:  # loop already closed
+                pass
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(5)
 
     def _run(self) -> None:
         async def main() -> None:
             self._loop = asyncio.get_running_loop()
             self._stop = asyncio.Event()
-            try:
-                await self.controller.connect()
-            except BaseException as ex:  # report to the caller of start()
-                self._error = ex
+            if self._stop_requested:
+                self._stop.set()
+            connect = asyncio.ensure_future(self.controller.connect())
+            stop_wait = asyncio.ensure_future(self._stop.wait())
+            await asyncio.wait({connect, stop_wait}, return_when=asyncio.FIRST_COMPLETED)
+            if not connect.done():  # stop() while still connecting
+                connect.cancel()
+                await asyncio.gather(connect, return_exceptions=True)
+                self._error = TrikiError("connection cancelled")
+            elif connect.cancelled():
+                self._error = TrikiError("connection cancelled")
+            elif connect.exception() is not None:
+                self._error = connect.exception()
+            if self._error is not None:
+                stop_wait.cancel()
+                try:
+                    await self.controller.disconnect()
+                except Exception:
+                    pass
                 self._ready.set()
                 return
             self._ready.set()
             try:
-                await self._stop.wait()
+                await stop_wait
             finally:
                 await self.controller.disconnect()
-        asyncio.run(main())
+        try:
+            asyncio.run(main())
+        except BaseException as ex:  # never leave start() waiting
+            self._error = self._error or ex
+            self._ready.set()
 
     def __enter__(self) -> "BackgroundTriki":
         return self.start() if self._thread is None else self
@@ -103,6 +129,17 @@ class BackgroundTriki:
 
     def zero(self) -> None:
         self.controller.zero()
+
+    def calibration_snapshot(self):
+        return self.controller.calibration_snapshot()
+
+    def restore_calibration(self, snapshot) -> None:
+        """Call before start(): reuse a saved calibration instead of measuring a new one."""
+        self.controller.restore_calibration(snapshot)
+
+    @property
+    def seconds_since_data(self) -> float:
+        return self.controller.seconds_since_data
 
     def wait_calibrated(self, timeout: Optional[float] = 15.0) -> bool:
         return self._calibrated.wait(timeout)
