@@ -138,6 +138,15 @@ class BackgroundTriki:
         self.controller.restore_calibration(snapshot)
 
     @property
+    def battery(self):
+        """Battery level in percent, or None until known."""
+        return self.controller.battery
+
+    @property
+    def device_info(self) -> dict:
+        return self.controller.device_info
+
+    @property
     def seconds_since_data(self) -> float:
         return self.controller.seconds_since_data
 

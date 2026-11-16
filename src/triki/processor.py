@@ -23,6 +23,11 @@ Events (each handler receives one :class:`Event`):
 ``tap``            a knock on the table (or on the cap) while it lies still,
                    ``value`` = strength in g
 ``double_tap``     second tap within ``Config.double_tap_s``
+``tilt``           cap tipped onto one edge and held there: ``value`` is ``"left"``,
+                   ``"right"`` (towards -X / +X), ``"forward"`` or ``"back"`` (+Y / -Y);
+                   repeats every ``Config.tilt_repeat_s`` while held
+``shake``          a few strong back-and-forth jolts
+``battery``        battery level changed, ``value`` = percent (real caps only)
 ``status``         a non-IMU frame arrived, ``value`` = its raw bytes
 =================  ==========================================================
 
@@ -47,7 +52,7 @@ log = logging.getLogger("triki")
 _FLIP_X: Quat = (0.0, 1.0, 0.0, 0.0)  # 180 deg about X
 
 EVENTS = ("frame", "calibrated", "press", "release", "click", "single_click", "double_click",
-          "long_press", "twist", "flip", "tap", "double_tap", "status")
+          "long_press", "twist", "flip", "tap", "double_tap", "tilt", "shake", "battery", "status")
 
 
 @dataclass
@@ -80,6 +85,15 @@ class Config:
     tap_refractory_s: float = 0.08    # one knock rings for a few samples - count it once
     tap_confirm_s: float = 0.15       # wait this long so a button press can veto the tap
     double_tap_s: float = 0.5
+    # tilt (tip the cap onto an edge and hold)
+    tilt_threshold_deg: float = 25.0
+    tilt_max_deg: float = 65.0        # steeper = it is being flipped, not tilted
+    tilt_hold_s: float = 0.25
+    tilt_repeat_s: float = 0.6        # 0 = fire once per tilt
+    # shake
+    shake_threshold_g: float = 0.8    # acceleration must stray this far from gravity...
+    shake_count: int = 4              # ...this many times...
+    shake_window_s: float = 1.0       # ...within this long
 
 
 @dataclass(frozen=True)
@@ -98,6 +112,8 @@ class State:
     face: Optional[str] = None             # "up", "down" or None (on edge / unknown)
     twist_dps: float = 0.0                 # + = clockwise seen from above
     impact_g: float = 0.0                  # accelerometer jump this sample (what taps are measured by)
+    lean_x: float = 0.0                    # degrees the +X edge is tipped down (- = the -X edge)
+    lean_y: float = 0.0                    # degrees the +Y edge is tipped down
     calibrating: bool = True
 
     @property
@@ -186,6 +202,13 @@ class Processor(EventEmitter):
         self._last_candidate = -1e9
         self._quiet_until = 0.0      # no taps until then (motion / button)
         self._last_tap = -1e9
+        # tilt / shake
+        self._tilt_pending: Optional[str] = None
+        self._tilt_since = 0.0
+        self._tilt_fired_at: Optional[float] = None
+        self._shake_peaks: List[float] = []
+        self._gravity_lp: Optional[Vec3] = None
+        self._shake_quiet_until = 0.0
 
     # ------------------------------------------------------------- control
     @property
@@ -364,11 +387,61 @@ class Processor(EventEmitter):
             events.append(("flip", face))
 
         impact = self._update_taps(gyro, accel, t, events)
+        lean_x, lean_y = self._update_tilt(q, t, events)
+        self._update_shake(accel, t, events)
 
         self.state = State(t=t, frame=self._frames, button=frame.button, raw=axes,
                            gyro_dps=gyro, accel_g=accel, quaternion=q,
                            roll=roll, pitch=pitch, yaw=yaw, up_z=up_z, face=face,
-                           twist_dps=twist, impact_g=impact, calibrating=False)
+                           twist_dps=twist, impact_g=impact, lean_x=lean_x, lean_y=lean_y,
+                           calibrating=False)
+
+    def _update_tilt(self, q: Quat, t: float, events) -> Tuple[float, float]:
+        cfg = self.config
+        m = q_to_matrix(q)
+        up = (m[2][0], m[2][1], m[2][2])            # world 'up' seen from the cap
+        side = 1.0 if up[2] >= 0 else -1.0          # face down mirrors forward/back
+        flat = abs(up[2])
+        lean_x = math.degrees(math.atan2(-up[0], flat))
+        lean_y = math.degrees(math.atan2(-up[1], flat)) * side
+        big = max(abs(lean_x), abs(lean_y))
+        direction = None
+        if cfg.tilt_threshold_deg <= big <= cfg.tilt_max_deg:
+            if abs(lean_x) >= abs(lean_y):
+                direction = "right" if lean_x > 0 else "left"
+            else:
+                direction = "forward" if lean_y > 0 else "back"
+        if direction != self._tilt_pending:
+            self._tilt_pending, self._tilt_since, self._tilt_fired_at = direction, t, None
+        elif direction is not None:
+            if self._tilt_fired_at is None:
+                if t - self._tilt_since >= cfg.tilt_hold_s:
+                    self._tilt_fired_at = t
+                    events.append(("tilt", direction))
+            elif cfg.tilt_repeat_s > 0 and t - self._tilt_fired_at >= cfg.tilt_repeat_s:
+                self._tilt_fired_at = t
+                events.append(("tilt", direction))
+        return lean_x, lean_y
+
+    def _update_shake(self, accel: Vec3, t: float, events) -> None:
+        cfg = self.config
+        # distance from a slowly tracked gravity vector: catches sideways shakes too
+        g = self._gravity_lp or accel
+        g = tuple(gc + 0.05 * (ac - gc) for gc, ac in zip(g, accel))
+        self._gravity_lp = g
+        dev = math.sqrt(sum((ac - gc) ** 2 for ac, gc in zip(accel, g)))
+        if dev >= cfg.shake_threshold_g and t < self._shake_quiet_until:
+            self._shake_quiet_until = t + 0.6    # still shaking: one shake = one event
+            return
+        if dev >= cfg.shake_threshold_g and (not self._shake_peaks or t - self._shake_peaks[-1] >= 0.08):
+            self._shake_peaks.append(t)
+        self._shake_peaks = [p for p in self._shake_peaks if t - p <= cfg.shake_window_s]
+        if len(self._shake_peaks) >= cfg.shake_count and t >= self._shake_quiet_until:
+            events.append(("shake", None))
+            self._shake_peaks = []
+            self._shake_quiet_until = t + 0.6
+            self._tap_candidates = []             # the jolts of a shake are not taps
+            self._quiet_until = max(self._quiet_until, t + 0.5)
 
     def _update_taps(self, gyro: Vec3, accel: Vec3, t: float, events) -> float:
         cfg = self.config

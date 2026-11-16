@@ -18,6 +18,20 @@ Nordic UART Service (NUS):
 Notifications are a byte stream: a frame can be split across notifications and
 one notification can carry several frames.
 
+## Standard services — confirmed
+
+Besides the UART service the cap exposes standard Bluetooth services (seen in
+software from the cap's maker):
+
+| service | characteristic | content |
+|---|---|---|
+| Battery `0x180F` | Battery Level `0x2A19` | 1 byte, 0–100 % |
+| Generic Access `0x1800` | Device Name `0x2A00` | text |
+| Device Information `0x180A` | `0x2A29` manufacturer, `0x2A24` model, `0x2A25` serial, `0x2A26` firmware, `0x2A27` hardware, `0x2A28` software, `0x2A23` system ID, `0x2A50` PnP ID | text / binary |
+
+`cap.battery`, the `battery` event and `cap.device_info` read these;
+`triki info` prints them.
+
 ## Commands
 
 | command | bytes | status |
@@ -71,6 +85,5 @@ and emits its bytes as a `status` event. Could be a command acknowledgement
 
 * What do `0x21` frames contain?
 * Are other sample rates / ranges accepted by the start command?
-* Battery level, firmware version, device name characteristics?
 * Is the sensor's Z axis the cap's face normal? (`cap.zero()` compensates either way.)
 * Exact sample rate on the wire (check `state.frame` against wall time).

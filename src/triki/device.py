@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import AsyncIterator, List, Optional
 
 from .processor import Config, Event, Processor, State
-from .protocol import CMD_START, CMD_STOP, NUS_NOTIFY, NUS_WRITE
+from .protocol import BATTERY_LEVEL, CMD_START, CMD_STOP, DEVICE_INFO, DEVICE_NAME, NUS_NOTIFY, NUS_WRITE
 
 log = logging.getLogger("triki")
 
@@ -62,6 +62,8 @@ class Controller:
     def __init__(self, config: Optional[Config] = None):
         self.processor = Processor(config)
         self._restore = None
+        self.battery: Optional[int] = None     # percent, None until known
+        self.device_info: dict = {}            # name, manufacturer, model, firmware, ...
 
     # --- delegation
     @property
@@ -85,6 +87,13 @@ class Controller:
 
     def calibrate(self) -> None:
         self.processor.start_calibration()
+
+    def _set_battery(self, level: Optional[int]) -> None:
+        if level is None or level == self.battery:
+            return
+        self.battery = level
+        st = self.processor.state
+        self.processor.emit(Event("battery", st.t, st, level))
 
     def calibration_snapshot(self):
         """Plain dict describing the current calibration (save it to skip calibrating next time)."""
@@ -169,7 +178,9 @@ class Triki(Controller):
         self.address = address
         self.start_command = start_command
         self._client = None
+        self._battery_task = None
         self.on_disconnect = None  # optional callable()
+        self.battery_poll_s = 60.0
 
     @property
     def is_connected(self) -> bool:
@@ -187,8 +198,47 @@ class Triki(Controller):
         await self._client.start_notify(NUS_NOTIFY, lambda _s, data: self.processor.feed(bytes(data)))
         await self.send(self.start_command)
         log.info("connected to %s", self.address)
+        await self._read_device_info()
+        await self._start_battery()
+
+    async def _read_device_info(self) -> None:
+        info = {}
+        for key, uuid in (("name", DEVICE_NAME), *DEVICE_INFO.items()):
+            try:
+                raw = await self._client.read_gatt_char(uuid)
+                info[key] = bytes(raw).decode("utf-8", "replace").strip("\x00 ").strip()
+            except Exception:
+                pass  # not every cap / firmware has every field
+        self.device_info = info
+
+    async def read_battery(self) -> Optional[int]:
+        """Battery level in percent (standard Bluetooth battery service), or None."""
+        try:
+            raw = await self._client.read_gatt_char(BATTERY_LEVEL)
+        except Exception:
+            return None
+        level = raw[0] if raw else None
+        self._set_battery(level)
+        return level
+
+    async def _start_battery(self) -> None:
+        if await self.read_battery() is None:
+            return
+        try:   # push updates if the cap supports it...
+            await self._client.start_notify(BATTERY_LEVEL, lambda _s, d: self._set_battery(d[0] if d else None))
+        except Exception:
+            pass
+        self._battery_task = asyncio.ensure_future(self._battery_loop())   # ...and poll as a fallback
+
+    async def _battery_loop(self) -> None:
+        while self.is_connected:
+            await asyncio.sleep(self.battery_poll_s)
+            await self.read_battery()
 
     async def disconnect(self) -> None:
+        if self._battery_task:
+            self._battery_task.cancel()
+            self._battery_task = None
         client, self._client = self._client, None
         if client and client.is_connected:
             try:

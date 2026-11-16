@@ -60,6 +60,16 @@ class ImuSimulator:
         return b"".join(self.step(button=button, accel_offset_g=(0.05 * k * strength_g, 0.0, k * strength_g))
                         for k in ring)
 
+    def shake(self, seconds: float = 0.8, strength_g: float = 1.5, hz: float = 6.0) -> bytes:
+        """Shake the cap back and forth along its X axis."""
+        n = int(seconds * self.sample_rate)
+        out = []
+        for i in range(n):
+            ph = 2 * math.pi * hz * i / self.sample_rate
+            w = (0.0, 0.0, 2.0 * math.cos(ph))            # some wobble too
+            out.append(self.step(w, accel_offset_g=(strength_g * math.sin(ph), 0.0, 0.0)))
+        return b"".join(out)
+
     def rotate(self, axis: Vec3, degrees: float, seconds: float, button: bool = False) -> bytes:
         """Rotate about a body axis at constant speed."""
         n = max(1, int(seconds * self.sample_rate))
@@ -85,6 +95,8 @@ class SimulatedTriki(Controller):
 
     async def connect(self) -> None:
         self.processor.start_calibration(self._restore)
+        self.device_info = {"name": "Simulated Triki", "manufacturer": "triki-py", "firmware": "sim"}
+        self._set_battery(87)
         self._task = asyncio.get_running_loop().create_task(self._run())
 
     async def disconnect(self) -> None:

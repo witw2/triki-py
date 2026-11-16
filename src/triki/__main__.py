@@ -36,6 +36,16 @@ async def _monitor(args) -> None:
             await asyncio.sleep(0.05)
 
 
+async def _info(args) -> None:
+    async with _controller(args) as cap:
+        await asyncio.sleep(0.5)
+        info = dict(cap.device_info)
+        print(f"address    {getattr(cap, 'address', '-')}")
+        for key, value in info.items():
+            print(f"{key:<10} {value}")
+        print(f"battery    {'unknown' if cap.battery is None else str(cap.battery) + ' %'}")
+
+
 async def _events(args) -> None:
     async with _controller(args) as cap:
         print("calibrating - keep the cap still...", flush=True)
@@ -50,13 +60,14 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan", help="list nearby BLE devices")
     s.add_argument("--timeout", type=float, default=5.0)
-    for name, help_ in (("monitor", "live orientation readout"), ("events", "print gestures as they happen")):
+    for name, help_ in (("monitor", "live orientation readout"), ("events", "print gestures as they happen"),
+                        ("info", "battery level and device information")):
         m = sub.add_parser(name, help=help_)
         m.add_argument("--address", help="BLE address (default: nearest Triki)")
         m.add_argument("--sim", action="store_true", help="use the built-in simulator")
     args = p.parse_args(argv)
     try:
-        asyncio.run({"scan": _scan, "monitor": _monitor, "events": _events}[args.cmd](args))
+        asyncio.run({"scan": _scan, "monitor": _monitor, "events": _events, "info": _info}[args.cmd](args))
     except KeyboardInterrupt:
         print()
     except Exception as ex:

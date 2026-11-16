@@ -77,3 +77,20 @@ def test_restored_calibration_skips_waiting():
         assert second.wait_calibrated(1)
         assert second.seconds_since_data < 0.5
     assert infos[0]["restored"] is True
+
+
+def test_simulated_battery_and_info():
+    levels = []
+    cap = triki.BackgroundTriki(simulate=True)
+    cap.on("battery", lambda e: levels.append(e.value))
+    with cap:
+        time.sleep(0.2)
+        assert cap.battery == 87 and levels == [87]
+        assert cap.device_info["name"] == "Simulated Triki"
+
+
+def test_cli_info_simulated(capsys):
+    from triki.__main__ import main
+    main(["info", "--sim"])
+    out = capsys.readouterr().out
+    assert "battery    87 %" in out and "Simulated Triki" in out

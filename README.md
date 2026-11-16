@@ -5,7 +5,7 @@ sized Bluetooth LE device with an accelerometer, a gyroscope and a button.
 
 It handles the BLE connection, reassembles the data stream, calibrates the
 sensors, tracks the cap's 3D orientation and turns motion into simple events:
-**click, double click, long press, twist (knob), flip and taps on the table**.
+**click, double click, long press, twist (knob), flip, tilt, shake and taps on the table**.
 
 ```python
 import triki
@@ -50,6 +50,7 @@ automatically), which supports Windows, macOS and Linux.
 triki scan              # list nearby BLE devices, Trikis marked with *
 triki monitor           # live roll / pitch / yaw readout
 triki events            # print gestures as they happen
+triki info              # battery level, name, model, firmware
 triki monitor --sim     # same, with the simulator
 ```
 
@@ -89,6 +90,7 @@ async with triki.Triki() as cap:          # or triki.SimulatedTriki()
 | `face` | `"up"`, `"down"` or `None` while on its edge |
 | `twist_dps` | spin speed about the vertical axis, + = clockwise seen from above |
 | `impact_g` | accelerometer jump this sample (what taps are measured by) |
+| `lean_x`, `lean_y` | degrees the cap is tipped towards its +X / +Y edge (what tilts are measured by) |
 | `quaternion` | `(w, x, y, z)` body → world |
 | `gyro_dps`, `accel_g` | calibrated sensor readings in the cap's own frame |
 | `button` | button currently held |
@@ -106,6 +108,9 @@ async with triki.Triki() as cap:          # or triki.SimulatedTriki()
 | `twist` | degrees turned this sample, + = clockwise. Use `triki.Knob` to get whole notches |
 | `flip` | `"up"` or `"down"` once the cap has settled |
 | `tap`, `double_tap` | strength in g — a knock on the table next to the cap while it lies still |
+| `tilt` | `"left"`, `"right"`, `"forward"`, `"back"` — tipped onto an edge and held; repeats while held |
+| `shake` | — a few strong back-and-forth jolts |
+| `battery` | percent — from the standard Bluetooth battery service (also `cap.battery`) |
 | `calibrated` | dict: detected gyro axes, 1 g in LSB, gyro bias, noise |
 | `status` | raw bytes of a non-IMU frame (protocol research) |
 | `frame` | — (every sample) |

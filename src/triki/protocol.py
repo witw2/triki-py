@@ -30,6 +30,23 @@ FRAME_STATUS = 0x21
 IMU_FRAME_SIZE = 14
 STATUS_FRAME_SIZE = 4
 
+# Standard Bluetooth services the cap also offers (confirmed by its maker's own software)
+def _uuid16(n: int) -> str:
+    return f"0000{n:04x}-0000-1000-8000-00805f9b34fb"
+
+
+BATTERY_SERVICE = _uuid16(0x180F)
+BATTERY_LEVEL = _uuid16(0x2A19)          # one byte, 0-100 %
+DEVICE_NAME = _uuid16(0x2A00)
+DEVICE_INFO = {                          # Device Information service (0x180A)
+    "manufacturer": _uuid16(0x2A29),
+    "model": _uuid16(0x2A24),
+    "serial": _uuid16(0x2A25),
+    "firmware": _uuid16(0x2A26),
+    "hardware": _uuid16(0x2A27),
+    "software": _uuid16(0x2A28),
+}
+
 CMD_STOP = bytes([0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
 
 

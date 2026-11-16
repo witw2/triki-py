@@ -228,3 +228,50 @@ def test_button_held_when_data_starts_is_not_a_click():
 
 def test_snapshot_none_before_first_calibration():
     assert Processor().calibration_snapshot() is None
+
+
+@pytest.mark.parametrize("axis, angle, expect", [
+    ((0, 1, 0), 35, "right"),     # +X edge goes down
+    ((0, 1, 0), -35, "left"),
+    ((1, 0, 0), -35, "forward"),  # +Y edge goes down
+    ((1, 0, 0), 35, "back"),
+])
+def test_tilt_directions(axis, angle, expect):
+    sim, p, events = calibrated(seed=30)
+    events.clear()
+    p.feed(sim.rotate(axis, angle, 0.3) + sim.hold(0.4))
+    tilts = [e.value for e in events if e.name == "tilt"]
+    assert tilts == [expect]
+
+
+def test_tilt_repeats_while_held_and_brief_tilt_ignored():
+    sim, p, events = calibrated(seed=31, config=Config(tilt_repeat_s=0.5))
+    events.clear()
+    p.feed(sim.rotate((0, 1, 0), 35, 0.2) + sim.hold(0.1) + sim.rotate((0, 1, 0), -35, 0.2))  # brief
+    assert "tilt" not in names(events)
+    p.feed(sim.rotate((0, 1, 0), 35, 0.2) + sim.hold(1.3))  # held: fires, then repeats twice
+    assert [e.value for e in events if e.name == "tilt"] == ["right", "right", "right"]
+
+
+def test_flip_is_not_a_tilt():
+    sim, p, events = calibrated(seed=32)
+    events.clear()
+    p.feed(sim.rotate((1, 0, 0), 180, 0.5) + sim.hold(1.0))
+    assert "tilt" not in names(events) and "flip" in names(events)
+
+
+def test_shake():
+    sim, p, events = calibrated(seed=33)
+    events.clear()
+    p.feed(sim.shake(1.5) + sim.hold(0.8))       # one long shake -> one event
+    assert names(events).count("shake") == 1
+    assert "tap" not in names(events)
+    p.feed(sim.shake(0.8) + sim.hold(0.8))       # a second shake after a pause
+    assert names(events).count("shake") == 2
+
+
+def test_gentle_motion_is_not_a_shake():
+    sim, p, events = calibrated(seed=34)
+    events.clear()
+    p.feed(sim.shake(0.8, strength_g=0.3) + sim.hold(0.5))
+    assert "shake" not in names(events)

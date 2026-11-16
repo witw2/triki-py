@@ -6,6 +6,7 @@ Minimal Windows audio control via Core Audio COM (needs: pip install comtypes).
   * list active output devices
   * get / set master volume of the default output device
   * mute / unmute the default microphone
+  * per-application volume (the app that is playing right now)
   * press the media volume keys (Windows shows its own volume overlay)
   * change the default output device (undocumented IPolicyConfig, the same
     interface Windows' own sound panel and tools like SoundSwitch use)
@@ -119,6 +120,112 @@ class IPolicyConfig(IUnknown):
     ]
 
 
+# ---- per-application volume (audio sessions)
+class ISimpleAudioVolume(IUnknown):
+    _iid_ = GUID("{87CE5498-68D6-44E5-9215-6DA47EF883D8}")
+    _methods_ = [
+        STDMETHOD(HRESULT, "SetMasterVolume", [c_float, POINTER(GUID)]),
+        STDMETHOD(HRESULT, "GetMasterVolume", [POINTER(c_float)]),
+        STDMETHOD(HRESULT, "SetMute", [BOOL, POINTER(GUID)]),
+        STDMETHOD(HRESULT, "GetMute", [POINTER(BOOL)]),
+    ]
+
+
+class IAudioMeterInformation(IUnknown):
+    _iid_ = GUID("{C02216F6-8C67-4B5B-9D00-D008E73E0064}")
+    _methods_ = [STDMETHOD(HRESULT, "GetPeakValue", [POINTER(c_float)])]
+
+
+class IAudioSessionControl(IUnknown):
+    _iid_ = GUID("{F4B1A599-7266-4319-A8CA-E70ACB11E8CD}")
+    _methods_ = [
+        STDMETHOD(HRESULT, "GetState", [POINTER(c_uint)]),
+        STDMETHOD(HRESULT, "GetDisplayName", [POINTER(c_wchar_p)]),
+        STDMETHOD(HRESULT, "SetDisplayName", [LPCWSTR, POINTER(GUID)]),
+        STDMETHOD(HRESULT, "GetIconPath", [POINTER(c_wchar_p)]),
+        STDMETHOD(HRESULT, "SetIconPath", [LPCWSTR, POINTER(GUID)]),
+        STDMETHOD(HRESULT, "GetGroupingParam", [POINTER(GUID)]),
+        STDMETHOD(HRESULT, "SetGroupingParam", [POINTER(GUID), POINTER(GUID)]),
+        STDMETHOD(HRESULT, "RegisterAudioSessionNotification", [c_void_p]),
+        STDMETHOD(HRESULT, "UnregisterAudioSessionNotification", [c_void_p]),
+    ]
+
+
+class IAudioSessionControl2(IAudioSessionControl):
+    _iid_ = GUID("{bfb7ff88-7239-4fc9-8fa2-07c950be9c6d}")
+    _methods_ = [
+        STDMETHOD(HRESULT, "GetSessionIdentifier", [POINTER(c_wchar_p)]),
+        STDMETHOD(HRESULT, "GetSessionInstanceIdentifier", [POINTER(c_wchar_p)]),
+        STDMETHOD(HRESULT, "GetProcessId", [POINTER(DWORD)]),
+        STDMETHOD(HRESULT, "IsSystemSoundsSession", []),
+        STDMETHOD(HRESULT, "SetDuckingPreference", [BOOL]),
+    ]
+
+
+class IAudioSessionEnumerator(IUnknown):
+    _iid_ = GUID("{E2F5BB11-0570-40CA-ACDD-3AA01277DEE8}")
+    _methods_ = [
+        STDMETHOD(HRESULT, "GetCount", [POINTER(ctypes.c_int)]),
+        STDMETHOD(HRESULT, "GetSession", [ctypes.c_int, POINTER(POINTER(IAudioSessionControl))]),
+    ]
+
+
+class IAudioSessionManager2(IUnknown):
+    _iid_ = GUID("{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}")
+    _methods_ = [
+        STDMETHOD(HRESULT, "GetAudioSessionControl", [POINTER(GUID), DWORD, c_void_p]),
+        STDMETHOD(HRESULT, "GetSimpleAudioVolume", [POINTER(GUID), DWORD, c_void_p]),
+        STDMETHOD(HRESULT, "GetSessionEnumerator", [POINTER(POINTER(IAudioSessionEnumerator))]),
+    ]
+
+
+class AppSession:
+    """One application's audio on the default output device."""
+
+    def __init__(self, pid, name, volume_iface, meter_iface, active):
+        self.pid, self.name, self.active = pid, name, active
+        self._vol, self._meter = volume_iface, meter_iface
+
+    @property
+    def peak(self):
+        v = c_float()
+        try:
+            self._meter.GetPeakValue(ctypes.byref(v))
+        except comtypes.COMError:
+            return 0.0
+        return v.value
+
+    def get_volume(self):
+        v = c_float()
+        self._vol.GetMasterVolume(ctypes.byref(v))
+        return v.value
+
+    def set_volume(self, level):
+        level = max(0.0, min(1.0, level))
+        self._vol.SetMasterVolume(level, None)
+        return level
+
+    def __repr__(self):
+        return f"<AppSession {self.name} pid={self.pid} active={self.active}>"
+
+
+def _process_name(pid):
+    """'Spotify' for pid of Spotify.exe (no extra dependencies)."""
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return f"pid {pid}"
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = DWORD(520)
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            name = buf.value.rsplit("\\", 1)[-1]
+            return name[:-4] if name.lower().endswith(".exe") else name
+        return f"pid {pid}"
+    finally:
+        k32.CloseHandle(h)
+
+
 CLSID_PolicyConfigClient = GUID("{870af99c-171d-4f9e-af0d-e63df40c2bc9}")
 
 _ole32 = ctypes.oledll.ole32
@@ -185,6 +292,41 @@ class AudioController:
         level = max(0.0, min(1.0, level))
         self._volume_iface().SetMasterVolumeLevelScalar(level, None)
         return level
+
+    # ---- per-application volume
+    def app_sessions(self):
+        """Audio sessions (apps) on the default output, system sounds excluded."""
+        dev = self._enum.GetDefaultAudioEndpoint(E_RENDER, 0)
+        mgr = dev.Activate(ctypes.byref(IAudioSessionManager2._iid_), CLSCTX_ALL, None)            .QueryInterface(IAudioSessionManager2)
+        enum = POINTER(IAudioSessionEnumerator)()
+        mgr.GetSessionEnumerator(ctypes.byref(enum))
+        count = ctypes.c_int()
+        enum.GetCount(ctypes.byref(count))
+        out = []
+        for i in range(count.value):
+            ctl = POINTER(IAudioSessionControl)()
+            enum.GetSession(i, ctypes.byref(ctl))
+            ctl2 = ctl.QueryInterface(IAudioSessionControl2)
+            if ctl2.IsSystemSoundsSession() == 0:   # S_OK means "is system sounds"
+                continue
+            pid = DWORD()
+            ctl2.GetProcessId(ctypes.byref(pid))
+            state = c_uint()
+            ctl.GetState(ctypes.byref(state))
+            if state.value == 2:                    # expired
+                continue
+            out.append(AppSession(pid.value, _process_name(pid.value), ctl.QueryInterface(ISimpleAudioVolume),
+                                  ctl.QueryInterface(IAudioMeterInformation), state.value == 1))
+        return out
+
+    def loudest_app(self):
+        """The app that is making the most sound right now (or None)."""
+        best, best_peak = None, 0.0
+        for sess in self.app_sessions():
+            peak = sess.peak if sess.active else 0.0
+            if peak > best_peak:
+                best, best_peak = sess, peak
+        return best
 
     # ---- volume keys: Windows applies a 2 % step and shows its own volume overlay
     @staticmethod
